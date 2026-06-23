@@ -46,6 +46,36 @@ def find_gutter(page):
     return best[0] if best else None
 
 
+def determine_left_right_languages(src, max_pages_to_check=15):
+    """
+    Figure out, ONCE for the whole document, whether NL or FR is printed on
+    the left column. Belgian parliamentary docs are NOT consistent about
+    this across documents (some put FR left/NL right, others the reverse),
+    but within a single document the order is consistent page to page.
+    Checking once is far cheaper than re-detecting on every page, and just
+    as correct since the layout doesn't flip mid-document.
+    Returns ("nl", "fr") or ("fr", "nl") for (left_lang, right_lang).
+    """
+    checked = 0
+    for page in src:
+        if checked >= max_pages_to_check:
+            break
+        gutter = find_gutter(page)
+        if gutter is None:
+            continue
+        checked += 1
+        h = page.rect.height
+        w = page.rect.width
+        left_clip = fitz.Rect(0, 0, gutter, h)
+        right_clip = fitz.Rect(gutter, 0, w, h)
+        left_lang = detect_page_language(page, fallback=None, clip=left_clip)
+        right_lang = detect_page_language(page, fallback=None, clip=right_clip)
+        if left_lang and right_lang and left_lang != right_lang:
+            return left_lang, right_lang
+    # Couldn't confidently determine -- fall back to the common case
+    return "nl", "fr"
+
+
 def detect_page_language(page, fallback, clip=None):
     """Detect language of a page (or a clipped region of it); fall back to last known."""
     text = page.get_text(clip=clip).strip() if clip else page.get_text().strip()
@@ -68,7 +98,7 @@ def split_pdf(input_path, output_nl_path, output_fr_path, log=print):
     out_fr = fitz.open()
 
     last_single_lang = "nl"  # reasonable default for the very first page
-    last_left_lang = "nl"    # which language was on the LEFT, last time we were sure
+    left_lang, right_lang = determine_left_right_languages(src)
     report = []
 
     for i, page in enumerate(src):
@@ -76,28 +106,11 @@ def split_pdf(input_path, output_nl_path, output_fr_path, log=print):
         gutter = find_gutter(page)
 
         if gutter is not None:
-            # Two-column page. IMPORTANT: don't assume which side is which
-            # language -- Belgian parliamentary docs are NOT consistent about
-            # whether NL or FR is printed on the left. Some documents put FR
-            # left/NL right, others the reverse. So we detect the language of
-            # each column on every page and route accordingly, rather than
-            # hardcoding "left -> NL, right -> FR".
+            # Two-column page. Which language is on which side was already
+            # determined once for the whole document above -- no need to
+            # re-detect it on every single page.
             left_clip = fitz.Rect(0, 0, gutter, h)
             right_clip = fitz.Rect(gutter, 0, w, h)
-
-            left_lang = detect_page_language(page, fallback=last_left_lang, clip=left_clip)
-            right_lang = detect_page_language(
-                page, fallback=("fr" if last_left_lang == "nl" else "nl"), clip=right_clip
-            )
-
-            # Guard against both columns detecting as the same language
-            # (e.g. a page dominated by numbers/proper nouns) -- trust
-            # whichever side gave a confident reading and infer the other.
-            if left_lang == right_lang:
-                left_lang = last_left_lang
-                right_lang = "fr" if left_lang == "nl" else "nl"
-
-            last_left_lang = left_lang  # remember for the next ambiguous page
 
             left_target = out_nl if left_lang == "nl" else out_fr
             right_target = out_nl if right_lang == "nl" else out_fr
