@@ -46,9 +46,9 @@ def find_gutter(page):
     return best[0] if best else None
 
 
-def detect_page_language(page, fallback):
-    """Detect language of a full single-column page; fall back to last known."""
-    text = page.get_text().strip()
+def detect_page_language(page, fallback, clip=None):
+    """Detect language of a page (or a clipped region of it); fall back to last known."""
+    text = page.get_text(clip=clip).strip() if clip else page.get_text().strip()
     if len(text) < 20:
         return fallback
     try:
@@ -68,6 +68,7 @@ def split_pdf(input_path, output_nl_path, output_fr_path, log=print):
     out_fr = fitz.open()
 
     last_single_lang = "nl"  # reasonable default for the very first page
+    last_left_lang = "nl"    # which language was on the LEFT, last time we were sure
     report = []
 
     for i, page in enumerate(src):
@@ -75,17 +76,41 @@ def split_pdf(input_path, output_nl_path, output_fr_path, log=print):
         gutter = find_gutter(page)
 
         if gutter is not None:
-            # Two-column page -> copy left half to NL, right half to FR
+            # Two-column page. IMPORTANT: don't assume which side is which
+            # language -- Belgian parliamentary docs are NOT consistent about
+            # whether NL or FR is printed on the left. Some documents put FR
+            # left/NL right, others the reverse. So we detect the language of
+            # each column on every page and route accordingly, rather than
+            # hardcoding "left -> NL, right -> FR".
             left_clip = fitz.Rect(0, 0, gutter, h)
             right_clip = fitz.Rect(gutter, 0, w, h)
 
-            p_nl = out_nl.new_page(width=w, height=h)
-            p_nl.show_pdf_page(p_nl.rect, src, i, clip=left_clip)
+            left_lang = detect_page_language(page, fallback=last_left_lang, clip=left_clip)
+            right_lang = detect_page_language(
+                page, fallback=("fr" if last_left_lang == "nl" else "nl"), clip=right_clip
+            )
 
-            p_fr = out_fr.new_page(width=w, height=h)
-            p_fr.show_pdf_page(p_fr.rect, src, i, clip=right_clip)
+            # Guard against both columns detecting as the same language
+            # (e.g. a page dominated by numbers/proper nouns) -- trust
+            # whichever side gave a confident reading and infer the other.
+            if left_lang == right_lang:
+                left_lang = last_left_lang
+                right_lang = "fr" if left_lang == "nl" else "nl"
 
-            report.append((i + 1, "two-column", f"gutter={gutter:.1f}"))
+            last_left_lang = left_lang  # remember for the next ambiguous page
+
+            left_target = out_nl if left_lang == "nl" else out_fr
+            right_target = out_nl if right_lang == "nl" else out_fr
+
+            p_left = left_target.new_page(width=w, height=h)
+            p_left.show_pdf_page(p_left.rect, src, i, clip=left_clip)
+
+            p_right = right_target.new_page(width=w, height=h)
+            p_right.show_pdf_page(p_right.rect, src, i, clip=right_clip)
+
+            report.append(
+                (i + 1, "two-column", f"gutter={gutter:.1f}, left={left_lang}, right={right_lang}")
+            )
         else:
             # Single-column page -> detect language, route whole page
             lang = detect_page_language(page, last_single_lang)
