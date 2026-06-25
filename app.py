@@ -6,13 +6,16 @@ import streamlit as st
 
 from split_bilingual_pdf import split_pdf
 
-# --- Batch limits (adjustable) -------------------------------------------
-# These exist because Streamlit Community Cloud's free tier caps each app
-# at 1GB of RAM, shared across everyone using it at that moment. All files
-# selected in one batch sit fully in memory before/while processing, so we
-# cap both file count and combined size to stay well under that ceiling.
-MAX_FILES_PER_BATCH = 10
-MAX_TOTAL_SIZE_MB = 150
+# --- Batch limit (adjustable) --------------------------------------------
+# Streamlit Community Cloud's free tier caps each app at 1GB of RAM, shared
+# across everyone using it at that moment. File COUNT is a poor proxy for
+# memory pressure here, since these documents range from ~20 to 500+ pages
+# (a handful of large files can use more memory than many small ones). We
+# cap on combined upload size instead, which tracks actual memory use much
+# more directly: raw uploaded bytes stay in memory for the session, and the
+# zipped output (roughly 1.6x the input size, based on real measurements)
+# is cached in memory too so the download button doesn't trigger a re-split.
+MAX_TOTAL_SIZE_MB = 120
 # ---------------------------------------------------------------------------
 
 st.set_page_config(page_title="NL/FR PDF Splitter", page_icon="📄")
@@ -23,10 +26,7 @@ st.write(
     "parallel-column format) and get back separate, single-language PDFs "
     "for each one."
 )
-st.caption(
-    f"Batch limit: up to {MAX_FILES_PER_BATCH} files, "
-    f"{MAX_TOTAL_SIZE_MB}MB combined per upload."
-)
+st.caption(f"Batch limit: {MAX_TOTAL_SIZE_MB}MB combined per upload (any number of files).")
 
 uploaded_files = st.file_uploader(
     "Choose PDF file(s)", type="pdf", accept_multiple_files=True
@@ -43,19 +43,12 @@ if uploaded_files:
     if st.session_state.get("batch_fingerprint") != batch_fingerprint:
         total_size_mb = sum(f.size for f in uploaded_files) / (1024 * 1024)
 
-        if len(uploaded_files) > MAX_FILES_PER_BATCH:
-            st.error(
-                f"You've selected {len(uploaded_files)} files, which is over the "
-                f"{MAX_FILES_PER_BATCH}-file limit per batch. Please remove some "
-                "and split this into smaller batches."
-            )
-            st.stop()
-
         if total_size_mb > MAX_TOTAL_SIZE_MB:
             st.error(
-                f"These files total {total_size_mb:.0f}MB, which is over the "
-                f"{MAX_TOTAL_SIZE_MB}MB limit per batch. Please remove some "
-                "and split this into smaller batches."
+                f"You've selected {len(uploaded_files)} file(s) totaling "
+                f"{total_size_mb:.0f}MB, which is over the {MAX_TOTAL_SIZE_MB}MB "
+                "limit per batch. Please remove some and split this into "
+                "smaller batches."
             )
             st.stop()
 
