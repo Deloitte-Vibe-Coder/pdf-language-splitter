@@ -55,8 +55,9 @@ if uploaded_files:
     usage_ratio = total_size_mb / MAX_TOTAL_SIZE_MB
     over_budget = total_size_mb > MAX_TOTAL_SIZE_MB
 
-    # --- Live budget indicator, shown immediately on selection, before any
-    # processing starts, so the user sees where they stand right away. ---
+    # --- Live budget indicator, shown immediately on selection -- BEFORE
+    # anything is processed -- so the user can see where they stand and
+    # decide whether to proceed, rather than finding out after the fact. ---
     st.progress(
         min(usage_ratio, 1.0),
         text=f"{total_size_mb:.0f}MB / {MAX_TOTAL_SIZE_MB}MB used "
@@ -76,17 +77,21 @@ if uploaded_files:
     else:
         st.caption(f"{MAX_TOTAL_SIZE_MB - total_size_mb:.0f}MB of headroom left in this batch.")
 
-    # Streamlit reruns this whole script on every interaction -- including
-    # clicking the download button below. Without this fingerprint check,
-    # clicking "Download" would silently re-run the entire batch from
-    # scratch. We only (re)process when the actual set of uploaded files
-    # changes, and reuse the cached results otherwise.
     batch_fingerprint = tuple((f.name, f.size) for f in uploaded_files)
 
-    if over_budget:
-        st.stop()
+    # Processing only ever starts when this button is explicitly clicked --
+    # never automatically just because files were selected, and never again
+    # just because some other widget (like the download button) triggered a
+    # rerun. This is what makes the headroom indicator above meaningful: the
+    # user sees it and consciously decides to proceed, rather than the split
+    # already running before they've had a chance to look.
+    process_clicked = st.button(
+        "🚀 Process files",
+        disabled=over_budget,
+        use_container_width=True,
+    )
 
-    if st.session_state.get("batch_fingerprint") != batch_fingerprint:
+    if process_clicked and not over_budget:
         summary_rows = []
 
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -146,31 +151,39 @@ if uploaded_files:
             st.session_state.summary_rows = summary_rows
             st.session_state.zip_bytes = zip_path.read_bytes()
 
-    # Display cached results (whether just computed above, or reused as-is
-    # because this rerun was triggered by something like a button click)
-    summary_rows = st.session_state.summary_rows
-    n_ok = sum(1 for r in summary_rows if r["Status"] == "✅ Done")
-    st.success(f"Processed {n_ok}/{len(uploaded_files)} file(s) successfully.")
+    # Show results if we have them cached for THIS exact set of uploaded
+    # files -- either just computed above, or carried over from a previous
+    # run (e.g. this rerun was triggered by clicking the download button,
+    # not by clicking "Process files" again).
+    has_results_for_this_batch = (
+        st.session_state.get("batch_fingerprint") == batch_fingerprint
+        and st.session_state.get("summary_rows") is not None
+    )
 
-    st.dataframe(summary_rows, use_container_width=True)
+    if has_results_for_this_batch:
+        summary_rows = st.session_state.summary_rows
+        n_ok = sum(1 for r in summary_rows if r["Status"] == "✅ Done")
+        st.success(f"Processed {n_ok}/{len(uploaded_files)} file(s) successfully.")
 
-    col1, col2 = st.columns(2)
-    with col1:
-        if n_ok > 0:
-            st.download_button(
-                "⬇️ Download all results (.zip)",
-                data=st.session_state.zip_bytes,
-                file_name="split_results.zip",
-                mime="application/zip",
+        st.dataframe(summary_rows, use_container_width=True)
+
+        col1, col2 = st.columns(2)
+        with col1:
+            if n_ok > 0:
+                st.download_button(
+                    "⬇️ Download all results (.zip)",
+                    data=st.session_state.zip_bytes,
+                    file_name="split_results.zip",
+                    mime="application/zip",
+                    use_container_width=True,
+                )
+        with col2:
+            st.button(
+                "🗑️ Clear & start new batch",
+                on_click=clear_batch,
                 use_container_width=True,
+                help="Frees this batch's files and results from memory before you upload the next one.",
             )
-    with col2:
-        st.button(
-            "🗑️ Clear & start new batch",
-            on_click=clear_batch,
-            use_container_width=True,
-            help="Frees this batch's files and results from memory before you upload the next one.",
-        )
 
 st.caption(
     "This tool is intended for public Belgian parliamentary documents "
