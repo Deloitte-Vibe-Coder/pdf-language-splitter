@@ -1,3 +1,4 @@
+import gc
 import tempfile
 import zipfile
 from pathlib import Path
@@ -20,6 +21,22 @@ MAX_TOTAL_SIZE_MB = 120
 
 st.set_page_config(page_title="NL/FR PDF Splitter", page_icon="📄")
 
+# uploader_version is bumped by the "Clear" button below. Changing the
+# widget's key forces Streamlit to treat it as a brand new uploader with an
+# empty selection -- this is what actually drops the old files' bytes from
+# memory, rather than just hiding cached results while they linger.
+if "uploader_version" not in st.session_state:
+    st.session_state.uploader_version = 0
+
+
+def clear_batch():
+    st.session_state.batch_fingerprint = None
+    st.session_state.summary_rows = None
+    st.session_state.zip_bytes = None
+    st.session_state.uploader_version += 1
+    gc.collect()
+
+
 st.title("📄 Bilingual PDF Splitter")
 st.write(
     "Upload one or more Belgian parliamentary documents (Dutch/French "
@@ -29,10 +46,36 @@ st.write(
 st.caption(f"Batch limit: {MAX_TOTAL_SIZE_MB}MB combined per upload (any number of files).")
 
 uploaded_files = st.file_uploader(
-    "Choose PDF file(s)", type="pdf", accept_multiple_files=True
+    "Choose PDF file(s)", type="pdf", accept_multiple_files=True,
+    key=f"pdf_uploader_{st.session_state.uploader_version}",
 )
 
 if uploaded_files:
+    total_size_mb = sum(f.size for f in uploaded_files) / (1024 * 1024)
+    usage_ratio = total_size_mb / MAX_TOTAL_SIZE_MB
+    over_budget = total_size_mb > MAX_TOTAL_SIZE_MB
+
+    # --- Live budget indicator, shown immediately on selection, before any
+    # processing starts, so the user sees where they stand right away. ---
+    st.progress(
+        min(usage_ratio, 1.0),
+        text=f"{total_size_mb:.0f}MB / {MAX_TOTAL_SIZE_MB}MB used "
+             f"({len(uploaded_files)} file(s))",
+    )
+    if over_budget:
+        st.error(
+            f"⚠️ Over budget by {total_size_mb - MAX_TOTAL_SIZE_MB:.0f}MB. "
+            "Remove some files, or click \"Clear & start new batch\" below "
+            "and split this into smaller batches."
+        )
+    elif usage_ratio >= 0.8:
+        st.warning(
+            f"Approaching the limit -- {MAX_TOTAL_SIZE_MB - total_size_mb:.0f}MB "
+            "of headroom left in this batch."
+        )
+    else:
+        st.caption(f"{MAX_TOTAL_SIZE_MB - total_size_mb:.0f}MB of headroom left in this batch.")
+
     # Streamlit reruns this whole script on every interaction -- including
     # clicking the download button below. Without this fingerprint check,
     # clicking "Download" would silently re-run the entire batch from
@@ -40,18 +83,10 @@ if uploaded_files:
     # changes, and reuse the cached results otherwise.
     batch_fingerprint = tuple((f.name, f.size) for f in uploaded_files)
 
+    if over_budget:
+        st.stop()
+
     if st.session_state.get("batch_fingerprint") != batch_fingerprint:
-        total_size_mb = sum(f.size for f in uploaded_files) / (1024 * 1024)
-
-        if total_size_mb > MAX_TOTAL_SIZE_MB:
-            st.error(
-                f"You've selected {len(uploaded_files)} file(s) totaling "
-                f"{total_size_mb:.0f}MB, which is over the {MAX_TOTAL_SIZE_MB}MB "
-                "limit per batch. Please remove some and split this into "
-                "smaller batches."
-            )
-            st.stop()
-
         summary_rows = []
 
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -119,13 +154,22 @@ if uploaded_files:
 
     st.dataframe(summary_rows, use_container_width=True)
 
-    if n_ok > 0:
-        st.download_button(
-            "⬇️ Download all results (.zip)",
-            data=st.session_state.zip_bytes,
-            file_name="split_results.zip",
-            mime="application/zip",
+    col1, col2 = st.columns(2)
+    with col1:
+        if n_ok > 0:
+            st.download_button(
+                "⬇️ Download all results (.zip)",
+                data=st.session_state.zip_bytes,
+                file_name="split_results.zip",
+                mime="application/zip",
+                use_container_width=True,
+            )
+    with col2:
+        st.button(
+            "🗑️ Clear & start new batch",
+            on_click=clear_batch,
             use_container_width=True,
+            help="Frees this batch's files and results from memory before you upload the next one.",
         )
 
 st.caption(
